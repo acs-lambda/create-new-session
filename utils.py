@@ -121,7 +121,7 @@ def parse_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def authorize(user_id: str, session_id: str) -> None:
     """
-    Authorize a user by validating their session
+    Authorize a user by invoking the authorize Lambda function
     
     Args:
         user_id (str): The user ID to validate
@@ -134,26 +134,18 @@ def authorize(user_id: str, session_id: str) -> None:
         AuthorizationError: If authorization fails
     """
     try:
-        if not session_id:
-            raise AuthorizationError("No session ID provided")
-            
-        # Query the Sessions table
-        response = sessions_table.get_item(
-            Key={'session_id': session_id}
-        )
+        # Invoke the authorize Lambda function
+        response = invoke('Authorize', {
+            'user_id': user_id,
+            'session_id': session_id
+        })
         
-        session = response.get('Item')
-        if not session:
-            logger.warning(f"Session not found: {session_id}")
-            raise AuthorizationError("ACS: Unauthorized")
+        # Check if authorization was successful
+        if response['statusCode'] != 200 or not response['body'].get('authorized', False):
+            raise AuthorizationError(response['body'].get('message', 'ACS: Unauthorized'))
             
-        # Validate user_id matches session
-        if session.get('associated_account') != user_id:
-            logger.warning(f"User ID mismatch: {user_id} != {session.get('associated_account')}")
-            raise AuthorizationError("ACS: Unauthorized")
-                            
     except ClientError as e:
-        logger.error(f"DynamoDB error during authorization: {str(e)}")
+        logger.error(f"Lambda invocation error during authorization: {str(e)}")
         raise AuthorizationError("ACS: Unauthorized")
     except Exception as e:
         logger.error(f"Unexpected error during authorization: {str(e)}")
