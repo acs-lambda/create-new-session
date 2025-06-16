@@ -3,121 +3,83 @@ import boto3
 from typing import Dict, Any, Union, Optional
 from botocore.exceptions import ClientError
 import logging
+from config import logger, AWS_REGION
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Initialize AWS clients
-lambda_client = boto3.client('lambda')
+lambda_client = boto3.client('lambda', region_name=AWS_REGION)
 dynamodb = boto3.resource('dynamodb')
 sessions_table = dynamodb.Table('Sessions')
+
+class LambdaError(Exception):
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        self.message = message
+        super().__init__(f"[{status_code}] {message}")
 
 class AuthorizationError(Exception):
     """Custom exception for authorization failures"""
     pass
 
-def invoke(function_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def create_response(status_code, body):
+    """Creates a standard API Gateway response."""
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps(body),
+    }
+
+def invoke_lambda(function_name, payload, invocation_type="RequestResponse"):
     """
-    Invoke a Lambda function by name with the given payload
-    
-    Args:
-        function_name (str): Name of the Lambda function to invoke
-        payload (Dict[str, Any]): Payload to send to the Lambda function
-        
-    Returns:
-        Dict[str, Any]: Response from the Lambda function
-        
-    Raises:
-        ClientError: If Lambda invocation fails
+    Invokes another Lambda function and returns the entire response payload.
+    The caller is responsible for interpreting the response.
     """
     try:
+        logger.info(f"Invoking {function_name} with type {invocation_type}...")
         response = lambda_client.invoke(
             FunctionName=function_name,
-            InvocationType='RequestResponse',
-            Payload=json.dumps(payload)
+            InvocationType=invocation_type,
+            Payload=json.dumps(payload),
         )
         
-        # Parse the response payload
-        response_payload = json.loads(response['Payload'].read().decode('utf-8'))
-        
-        # If the Lambda function returned an error
-        if 'FunctionError' in response:
-            logger.error(f"Lambda function {function_name} returned an error: {response_payload}")
-            raise ClientError(
-                error_response={'Error': {'Message': response_payload.get('errorMessage', 'Unknown error')}},
-                operation_name='InvokeLambda'
-            )
+        response_payload = response["Payload"].read().decode("utf-8")
+        if not response_payload:
+            return {}
             
-        return response_payload
-        
-    except ClientError as e:
-        logger.error(f"Failed to invoke Lambda function {function_name}: {str(e)}")
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Lambda response for {function_name}: {str(e)}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error invoking Lambda function {function_name}: {str(e)}")
-        raise
+        return json.loads(response_payload)
 
-def parse_event(event: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Parse an event from either API Gateway or direct Lambda invocation by invoking the parse-event Lambda function
-    
-    Args:
-        event (Dict[str, Any]): The event to parse, either from API Gateway or direct Lambda
-        
-    Returns:
-        Dict[str, Any]: Parsed event data including body and cookies if present
-        
-    Raises:
-        ClientError: If Lambda invocation fails
-        Exception: If parsing fails
-    """
-    try:
-        # Invoke the parse-event Lambda function
-        response = invoke('ParseEvent', event)
-        
-        # Check if the parsing was successful
-        if response['statusCode'] != 200:
-            logger.error(f"Failed to parse event: {response['body']}")
-            raise Exception(f"Failed to parse event: {response['body'].get('message', 'Unknown error')}")
-            
-        return response['body']
-        
-    except Exception as e:
-        logger.error(f"Error parsing event: {str(e)}")
-        raise
-
-def authorize(user_id: str, session_id: str) -> None:
-    """
-    Authorize a user by invoking the authorize Lambda function
-    
-    Args:
-        user_id (str): The user ID to validate
-        session_id (str): The session ID to validate
-        
-    Returns:
-        None
-        
-    Raises:
-        AuthorizationError: If authorization fails
-    """
-    try:
-        # Invoke the authorize Lambda function
-        response = invoke('Authorize', {
-            'user_id': user_id,
-            'session_id': session_id
-        })
-        
-        # Check if authorization was successful
-        if response['statusCode'] != 200 or not response['body'].get('authorized', False):
-            raise AuthorizationError(response['body'].get('message', 'ACS: Unauthorized'))
-            
     except ClientError as e:
-        logger.error(f"Lambda invocation error during authorization: {str(e)}")
-        raise AuthorizationError("ACS: Unauthorized")
+        logger.error(f"ClientError invoking {function_name}: {e.response['Error']['Message']}")
+        raise LambdaError(500, f"Failed to invoke {function_name} due to a client error.")
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse JSON response from {function_name}")
+        raise LambdaError(500, f"Invalid JSON response from {function_name}.")
     except Exception as e:
-        logger.error(f"Unexpected error during authorization: {str(e)}")
-        raise AuthorizationError("ACS: Unauthorized") 
+        logger.error(f"An unexpected error occurred during invocation of {function_name}: {e}")
+        raise LambdaError(500, "An unexpected error occurred during Lambda invocation.")
+
+def parse_event(event):
+    """
+    Parse an event by invoking the ParseEvent Lambda function.
+    """
+    response = invoke_lambda('ParseEvent', event)
+    if response.get('statusCode') != 200:
+        raise LambdaError(response.get('statusCode', 500), "Failed to parse event.")
+    
+    return json.loads(response.get('body', '{}'))
+
+def authorize(user_id, session_id):
+    """
+    Authorize a user by invoking the Authorize Lambda function.
+    """
+    response = invoke_lambda('Authorize', {'user_id': user_id, 'session_id': session_id})
+    body = json.loads(response.get('body', '{}'))
+    
+    if response.get('statusCode') != 200 or not body.get('authorized'):
+        raise LambdaError(response.get('statusCode', 401), body.get('message', 'ACS: Unauthorized')) 
