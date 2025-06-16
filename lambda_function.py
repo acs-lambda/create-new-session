@@ -6,7 +6,7 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError
 from config import logger
-from utils import create_response, LambdaError, parse_event_body
+from utils import create_response, LambdaError, parse_event
 
 dynamodb = boto3.resource('dynamodb')
 sessions_table = dynamodb.Table('Sessions')
@@ -77,7 +77,7 @@ def manage_session(uid):
 
 def lambda_handler(event, context):
     try:
-        body = parse_event_body(event)
+        body = parse_event(event)
         uid = body.get('uid')
         
         session_info = manage_session(uid)
